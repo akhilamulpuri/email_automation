@@ -1,3 +1,4 @@
+import streamlit as st
 import win32com.client
 import pytesseract
 from pdf2image import convert_from_path
@@ -36,15 +37,17 @@ columns = [
 # LOAD EXISTING EXCEL
 # -----------------------------
 
-if os.path.exists(EXCEL_FILE):
-    existing_df = pd.read_excel(EXCEL_FILE)
-    processed_files = set(existing_df["Attachment Name"].astype(str))
-else:
-    existing_df = pd.DataFrame(columns=columns)
-    processed_files = set()
+def load_excel():
+    if os.path.exists(EXCEL_FILE):
+        df = pd.read_excel(EXCEL_FILE)
+        processed_files = set(df["Attachment Name"].astype(str))
+    else:
+        df = pd.DataFrame(columns=columns)
+        processed_files = set()
+    return df, processed_files
 
 # -----------------------------
-# FUNCTION: EXTRACT DATA
+# EXTRACT DATA FROM OCR
 # -----------------------------
 
 def extract_invoice_data(text, filename, sender, received_time):
@@ -78,98 +81,103 @@ def extract_invoice_data(text, filename, sender, received_time):
 
     return data
 
-
 # -----------------------------
-# FUNCTION: WRITE TO EXCEL
-# -----------------------------
-
-def write_to_excel(row):
-
-    global existing_df
-
-    existing_df = pd.concat([existing_df, pd.DataFrame([row])], ignore_index=True)
-
-    existing_df.to_excel(EXCEL_FILE, index=False)
-
-
-# -----------------------------
-# CONNECT TO OUTLOOK
+# WRITE TO EXCEL
 # -----------------------------
 
-print("Connecting to Outlook...")
-
-outlook = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
-
-inbox = outlook.GetDefaultFolder(6)
-
-messages = inbox.Items
-messages.Sort("[ReceivedTime]", True)
+def write_to_excel(df, row):
+    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    df.to_excel(EXCEL_FILE, index=False)
+    return df
 
 # -----------------------------
-# PROCESS EMAILS
+# MAIN PROCESS FUNCTION
 # -----------------------------
 
-for msg in messages:
+def process_invoices():
 
-    try:
-        subject = str(msg.Subject)
+    df, processed_files = load_excel()
 
-        if "invoice" in subject.lower():
+    st.write("Connecting to Outlook...")
 
-            sender = msg.SenderEmailAddress
-            received_time = msg.ReceivedTime
+    outlook = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
+    inbox = outlook.GetDefaultFolder(6)
 
-            print("\nInvoice Email Found:", subject)
+    messages = inbox.Items
+    messages.Sort("[ReceivedTime]", True)
 
-            if msg.Attachments.Count > 0:
+    processed_count = 0
 
-                for attachment in msg.Attachments:
+    for msg in messages:
 
-                    if attachment.FileName.lower().endswith(".pdf"):
+        try:
+            subject = str(msg.Subject)
 
-                        # Skip if already processed
-                        if attachment.FileName in processed_files:
-                            print("Already processed:", attachment.FileName)
-                            continue
+            if "invoice" in subject.lower():
 
-                        file_path = os.path.join(ATTACHMENT_FOLDER, attachment.FileName)
+                sender = msg.SenderEmailAddress
+                received_time = msg.ReceivedTime
 
-                        attachment.SaveAsFile(file_path)
+                st.write("Invoice Email Found:", subject)
 
-                        print("Saved:", file_path)
+                if msg.Attachments.Count > 0:
 
-                        # -----------------------------
-                        # OCR PROCESS
-                        # -----------------------------
+                    for attachment in msg.Attachments:
 
-                        images = convert_from_path(file_path, poppler_path=POPPLER_PATH)
+                        if attachment.FileName.lower().endswith(".pdf"):
 
-                        text = ""
+                            if attachment.FileName in processed_files:
+                                st.write("Already processed:", attachment.FileName)
+                                continue
 
-                        for img in images:
-                            text += pytesseract.image_to_string(img)
+                            file_path = os.path.join(ATTACHMENT_FOLDER, attachment.FileName)
 
-                        # -----------------------------
-                        # DATA EXTRACTION
-                        # -----------------------------
+                            attachment.SaveAsFile(file_path)
 
-                        data = extract_invoice_data(
-                            text,
-                            attachment.FileName,
-                            sender,
-                            received_time
-                        )
+                            st.write("Saved:", attachment.FileName)
 
-                        print("Extracted Data:", data)
+                            images = convert_from_path(file_path, poppler_path=POPPLER_PATH)
 
-                        write_to_excel(data)
+                            text = ""
 
-                        processed_files.add(attachment.FileName)
+                            for img in images:
+                                text += pytesseract.image_to_string(img)
 
-            else:
-                print("No attachments found")
+                            data = extract_invoice_data(
+                                text,
+                                attachment.FileName,
+                                sender,
+                                received_time
+                            )
 
-    except Exception as e:
-        print("Email error:", e)
+                            df = write_to_excel(df, data)
 
-print("\nProcess completed. Excel updated.")
+                            processed_files.add(attachment.FileName)
+
+                            processed_count += 1
+
+        except Exception as e:
+            st.error(e)
+
+    st.success(f"{processed_count} new invoices processed")
+
+    return df
+
+
+# -----------------------------
+# STREAMLIT UI
+# -----------------------------
+
+st.title("Invoice Automation System")
+
+st.write("Process Outlook invoice emails and extract invoice data.")
+
+if st.button("Process Invoice Emails"):
+
+    with st.spinner("Processing invoices..."):
+        df = process_invoices()
+
+    st.success("Processing complete!")
+
+    st.subheader("Invoice Data")
+    st.dataframe(df)
